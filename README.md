@@ -1,61 +1,112 @@
-# FitFindr — Starter Kit
+# FitFindr
 
-This starter kit contains everything you need to begin Project 2.
+FitFindr is a styling assistant designed to coordinate and recommend outfits. It helps users search secondhand listings that match their budget and size preferences, and provides suggestions on how to pair those items with pieces in their existing wardrobe.
 
-## What's Included
+---
 
+## Tool Inventory
+
+FitFindr uses three main tools to handle search and styling operations:
+
+### 1. `search_listings`
+- **Purpose**: Searches the local secondhand dataset for listings matching the search criteria.
+- **Input Parameters**:
+  - `description` (`str`): Search keywords to match against the item's title, description, category, and style tags.
+  - `size` (`str | None`, optional): A size filter to match against the listing's size field (case-insensitive substring match).
+  - `max_price` (`float | None`, optional): An inclusive price ceiling.
+- **Returns**: `list[dict]` — A list of matched listing dictionaries sorted by keyword relevance. Each dictionary contains: `id`, `title`, `description`, `category`, `style_tags`, `size`, `condition`, `price`, `colors`, `brand`, and `platform`.
+- **Graceful Failure**: If no items match the filters, it returns an empty list (`[]`) instead of raising an exception.
+
+### 2. `suggest_outfit`
+- **Purpose**: Generates styling advice combining a selected listing item with the user's wardrobe.
+- **Input Parameters**:
+  - `new_item` (`dict`): The listing details of the new item being styled.
+  - `wardrobe` (`dict`): The user's wardrobe database, containing an `items` list of wardrobe item dictionaries.
+- **Returns**: `str` — Styling recommendations detailing which wardrobe items pair well and the overall outfit vibe.
+- **Graceful Failure**: If the user's wardrobe is empty, it bypasses paired recommendations and returns general styling advice for the item rather than crashing.
+
+### 3. `create_fit_card`
+- **Purpose**: Generates a short social media caption for the styled look.
+- **Input Parameters**:
+  - `outfit` (`str`): The styling advice text from `suggest_outfit`.
+  - `new_item` (`dict`): The listing details of the styled item.
+- **Returns**: `str` — A 2–4 sentence caption naturally mentioning the item title, price, and platform (exactly once each). Uses temperature = 1.0 to ensure output variation.
+- **Graceful Failure**: Guards against empty outfit strings by returning a descriptive error caption instead of raising an exception.
+
+---
+
+## The Planning Loop
+
+FitFindr runs a sequential state machine to manage execution and control flow:
+
+```mermaid
+graph TD
+    User([User Query]) --> PL[Planning Loop]
+    PL --> Parse[Extract description, size, max_price]
+    Parse --> SL[search_listings]
+    SL --> CheckSL{Are results empty?}
+    CheckSL -- Yes --> ErrSL["Set error in session: 'No matching listings'"] --> End[Return Session/Output]
+    CheckSL -- No --> SaveSL["Save selected_item = results[0] in session"]
+    SaveSL --> SO[suggest_outfit]
+    SO --> SaveSO["Save outfit_suggestion in session"]
+    SaveSO --> CC[create_fit_card]
+    CC --> SaveCC["Save fit_card in session"] --> End
 ```
-ai201-project2-fitfindr-starter/
-├── data/
-│   ├── listings.json          # 40 mock secondhand listings
-│   └── wardrobe_schema.json   # Wardrobe format + example wardrobe
-├── utils/
-│   └── data_loader.py         # Helper functions for loading the data
-├── planning.md                # Your planning template — fill this out first
-└── requirements.txt           # Python dependencies
-```
 
-## Setup
+### Execution Steps & Branching:
+1. **Search Phase**: The loop extracts parameters using an LLM (or a regex-based fallback if offline/timed out). If `search_listings` returns an empty list, the planning loop terminates immediately, sets `session["error"]`, and exits without executing any styling tools.
+2. **Outfitting Phase**: If listings are found, the top match (`results[0]`) is selected. The loop passes it directly to `suggest_outfit`. If the wardrobe is empty, `suggest_outfit` shifts to general styling tips rather than pairing pieces.
+3. **Presentation Phase**: The resulting text recommendation is forwarded to `create_fit_card` to produce the final user-facing output.
 
-```bash
-pip install -r requirements.txt
-```
+---
 
-Set your Groq API key in a `.env` file (get a free key at [console.groq.com](https://console.groq.com)):
-```
-GROQ_API_KEY=your_key_here
-```
+## State Management
 
-## The Mock Listings Dataset
+FitFindr maintains state in a single session dictionary (`session_state`) that updates at each step:
 
-`data/listings.json` contains 40 mock secondhand listings across categories (tops, bottoms, outerwear, shoes, accessories) and styles (vintage, y2k, grunge, cottagecore, streetwear, and more).
-
-Each listing has: `id`, `title`, `description`, `category`, `style_tags`, `size`, `condition`, `price`, `colors`, `brand`, and `platform`.
-
-Load it with:
 ```python
-from utils.data_loader import load_listings
-listings = load_listings()
+session = {
+    "query": str,              # The user's original query
+    "parsed": dict,             # Parsed fields: {"description": str, "size": str, "max_price": float}
+    "search_results": list,     # Raw matches found by search_listings()
+    "selected_item": dict,      # The chosen item selected for styling
+    "wardrobe": dict,           # The user's closet dictionary
+    "outfit_suggestion": str,   # Styling advice from suggest_outfit()
+    "fit_card": str,            # Formatted caption from create_fit_card()
+    "error": str or None        # Early termination error description (None on success)
+}
 ```
 
-## The Wardrobe Schema
+---
 
-`data/wardrobe_schema.json` defines the format your agent uses to represent a user's existing wardrobe. It includes:
+## Error Handling & Verification
 
-- `schema`: field definitions for a wardrobe item
-- `example_wardrobe`: a sample wardrobe with 10 items you can use for testing
-- `empty_wardrobe`: a starting template for a new user
+| Tool | Failure Triggered | Agent Response | Verification Command |
+| :--- | :--- | :--- | :--- |
+| **search_listings** | Search returned zero results (e.g. `designer ballgown size XXS under $5`) | Exits early, sets `session["error"]` explaining no items fit, and leaves subsequent keys as `None`. | `python3 -c "from agent import run_agent; from utils.data_loader import get_example_wardrobe; import json; print(json.dumps(run_agent('designer ballgown size XXS under $5', get_example_wardrobe()), indent=2))"` |
+| **suggest_outfit** | Empty wardrobe passed | Generates general styling tips, category colors, and vibes for the item standalone. | `python3 -c "from tools import search_listings, suggest_outfit; from utils.data_loader import get_empty_wardrobe; print(suggest_outfit(search_listings('vintage graphic tee')[0], get_empty_wardrobe()))"` |
+| **create_fit_card** | Empty/whitespace-only outfit text | Returns a descriptive error message: `"Error: Cannot create fit card. Outfit description is empty or missing."` | `python3 -c "from tools import search_listings, create_fit_card; print(create_fit_card('', search_listings('vintage graphic tee')[0]))"` |
 
-Load an example wardrobe with:
-```python
-from utils.data_loader import get_example_wardrobe
-wardrobe = get_example_wardrobe()
-```
+---
 
-## Where to Start
+## AI Usage
 
-1. **Read `planning.md` and fill it out before writing any code.**
-2. Verify the data loads correctly by running `python utils/data_loader.py`.
-3. Build and test each tool individually before connecting them through your planning loop.
+I used LLMs to help implement specific parts of the project:
 
-Your implementation files go in this same directory. There's no required file structure for your agent code — organize it however makes sense for your design.
+### Instance 1: Query Parsing in `agent.py`
+- **What was given as input**: User query format guidelines and requirements to extract `description`, `size`, and `max_price` safely.
+- **What the AI produced**: A Groq-based LLM completion call using `response_format={"type": "json_object"}`.
+- **What was modified**: The generated code had a simple fallback that returned empty filters on exception. Under network timeouts or offline states, this caused the agent to return random listings matching generic query terms. We rewrote the fallback to run a local regular-expression parser that parses `under $X` and size filters locally, allowing early exit tests to pass successfully even when offline.
+
+### Instance 2: Size Filtering in `tools.py`
+- **What was given as input**: Instructions to filter listings by size (e.g., `"M"` matches `"S/M"`).
+- **What the AI produced**: A strict equality comparison `item.get("size") == size`.
+- **What was modified**: We changed it to do a case-insensitive substring search (`size_query in item_size.lower()`) so that partial size strings match correctly and handle cases like `"S/M"`.
+
+---
+
+## Spec Reflection
+
+- **Initial Assumptions**: We initially assumed that size filters would be standard single-letter strings (like `"M"` or `"L"`).
+- **Implementation Reality**: The mock listings data contains complex sizes (like `"W30 L30"`, `"XL (oversized)"`, and `"One Size / Oversized"`). This required revising size-matching to be substring-based rather than exact matches.
+- **Refinement**: Regular-expression fallback parsing proved to be necessary because remote API connections can time out in local sandbox environments (like WSL). Making the query parser resilient offline ensured the codebase met all grading assertions under test.

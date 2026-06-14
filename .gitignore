@@ -1,5 +1,6 @@
 # API keys — never commit these
 .env
+verification_tests.md
 
 # Python
 __pycache__/
